@@ -14,11 +14,27 @@ import {
 
 interface OperatorStats {
   operator_id: string;
+  operator_socket: string;
   total: string;
   successes: string;
   success_rate: string;
   avg_latency: string;
   avg_chunks: string;
+}
+
+interface RecoveryDetail {
+  blob_key: string;
+  total_chunks: string;
+  operators_ok: string;
+  operators_fail: string;
+  recoverable: boolean;
+}
+
+interface RecoveryStats {
+  blobs_checked: number;
+  blobs_recoverable: number;
+  recovery_rate: number;
+  details: RecoveryDetail[];
 }
 
 interface OverallStats {
@@ -28,89 +44,124 @@ interface OverallStats {
   avg_latency: number;
 }
 
-interface RecentProbe {
-  blob_key: string;
-  probe_timestamp: string;
-  operator_id: string;
-  operator_socket: string;
-  success: boolean;
-  latency_ms: number;
-  chunks_returned: number;
-  error_message: string | null;
+interface ApiResponse {
+  stats: OverallStats;
+  recovery: RecoveryStats;
+  operators: OperatorStats[];
 }
 
 export default function OperatorProbeChart() {
-  const [stats, setStats] = useState<OverallStats | null>(null);
-  const [operators, setOperators] = useState<OperatorStats[]>([]);
-  const [recent, setRecent] = useState<RecentProbe[]>([]);
+  const [data, setData] = useState<ApiResponse | null>(null);
 
   useEffect(() => {
-    const fetchData = async () => {
+    const f = async () => {
       const res = await fetch("/api/operators");
-      const d = await res.json();
-      setStats(d.stats);
-      setOperators(d.operators);
-      setRecent(d.recent);
+      setData(await res.json());
     };
-    fetchData();
-    const interval = setInterval(fetchData, 30_000);
+    f();
+    const interval = setInterval(f, 15_000);
     return () => clearInterval(interval);
   }, []);
 
+  if (!data) return null;
+
+  const { stats, recovery, operators } = data;
+
   const chartData = operators.map((o) => ({
-    operator: o.operator_id.slice(0, 8) + "...",
+    operator: o.operator_id.slice(0, 8),
     success_rate: parseFloat(o.success_rate),
+    avg_chunks: parseFloat(o.avg_chunks || "0"),
     total: parseInt(o.total),
   }));
 
   return (
-    <div className="space-y-6">
-      {/* Summary Card */}
-      <div className="rounded-xl border border-gray-700 bg-gray-800 p-5">
-        <h2 className="text-lg font-semibold text-white mb-3">
-          Operator Chunk Retrieval (Direct)
+    <div className="space-y-5">
+      {/* Recovery Assessment */}
+      <div className="rounded-xl border border-gray-700/50 bg-gray-800/50 p-5">
+        <h2 className="text-lg font-semibold text-white mb-4">
+          Blob Recoverability (Operator Chunk Verification)
         </h2>
-        {stats && stats.total > 0 ? (
-          <div className="flex gap-6 text-sm">
-            <div>
-              <span className="text-gray-400">Success Rate (24h): </span>
-              <span className={stats.success_rate >= 90 ? "text-green-400" : "text-red-400"}>
-                {stats.success_rate.toFixed(1)}%
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-400">Avg Latency: </span>
-              <span className="text-white">{stats.avg_latency.toFixed(0)}ms</span>
-            </div>
-            <div>
-              <span className="text-gray-400">Total Probes: </span>
-              <span className="text-white">{stats.total}</span>
-            </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+          <MiniCard
+            label="Recovery Rate"
+            value={`${recovery.recovery_rate.toFixed(0)}%`}
+            good={recovery.recovery_rate >= 95}
+          />
+          <MiniCard
+            label="Blobs Checked"
+            value={`${recovery.blobs_checked}`}
+          />
+          <MiniCard
+            label="Recoverable"
+            value={`${recovery.blobs_recoverable}/${recovery.blobs_checked}`}
+            good={recovery.blobs_recoverable === recovery.blobs_checked}
+          />
+          <MiniCard
+            label="Operator Probe Success"
+            value={`${stats.success_rate.toFixed(1)}%`}
+            good={stats.success_rate >= 90}
+          />
+        </div>
+
+        {/* Recovery details table */}
+        {recovery.details.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="text-xs uppercase text-gray-500 border-b border-gray-700">
+                <tr>
+                  <th className="py-2 px-3">Blob</th>
+                  <th className="py-2 px-3">Chunks</th>
+                  <th className="py-2 px-3">Operators OK/Fail</th>
+                  <th className="py-2 px-3">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recovery.details.slice(0, 10).map((r, i) => (
+                  <tr key={i} className="border-b border-gray-700/30">
+                    <td className="py-1.5 px-3 font-mono text-gray-400 text-xs">
+                      {r.blob_key.slice(0, 16)}...
+                    </td>
+                    <td className="py-1.5 px-3 text-gray-300">
+                      {parseInt(r.total_chunks || "0").toLocaleString()}/1024
+                    </td>
+                    <td className="py-1.5 px-3 text-gray-300">
+                      {r.operators_ok}/{parseInt(r.operators_ok) + parseInt(r.operators_fail)}
+                    </td>
+                    <td className="py-1.5 px-3">
+                      {r.recoverable ? (
+                        <span className="text-green-400 text-xs font-medium">RECOVERABLE</span>
+                      ) : (
+                        <span className="text-red-400 text-xs font-medium">AT RISK</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ) : (
-          <p className="text-gray-500 text-sm">No operator probe data yet...</p>
         )}
       </div>
 
-      {/* Per-Operator Bar Chart */}
+      {/* Per-Operator Chart */}
       {chartData.length > 0 && (
-        <div className="rounded-xl border border-gray-700 bg-gray-800 p-5">
+        <div className="rounded-xl border border-gray-700/50 bg-gray-800/50 p-5">
           <h3 className="text-md font-semibold text-white mb-4">
-            Per-Operator Success Rate
+            Per-Operator Chunk Availability
           </h3>
-          <ResponsiveContainer width="100%" height={250}>
+          <ResponsiveContainer width="100%" height={280}>
             <BarChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis dataKey="operator" stroke="#9CA3AF" fontSize={11} />
-              <YAxis domain={[0, 100]} stroke="#9CA3AF" />
+              <XAxis dataKey="operator" stroke="#6B7280" fontSize={10} angle={-45} textAnchor="end" height={60} />
+              <YAxis stroke="#6B7280" />
               <Tooltip
-                contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151" }}
+                contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", fontSize: "12px" }}
                 formatter={(value, name) => {
-                  if (name === "success_rate") return `${Number(value).toFixed(1)}%`;
-                  return String(value);
+                  if (name === "avg_chunks") return [`${Number(value).toFixed(0)} chunks`, "Avg Chunks"];
+                  if (name === "success_rate") return [`${Number(value).toFixed(1)}%`, "Success Rate"];
+                  return [String(value), String(name)];
                 }}
               />
-              <Bar dataKey="success_rate" radius={[4, 4, 0, 0]}>
+              <Bar dataKey="avg_chunks" name="avg_chunks" radius={[3, 3, 0, 0]}>
                 {chartData.map((entry, i) => (
                   <Cell
                     key={i}
@@ -122,61 +173,17 @@ export default function OperatorProbeChart() {
           </ResponsiveContainer>
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* Recent Operator Probes Log */}
-      {recent.length > 0 && (
-        <div className="rounded-xl border border-gray-700 bg-gray-800 p-5">
-          <h3 className="text-md font-semibold text-white mb-4">
-            Recent Operator Probes
-          </h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="text-xs uppercase text-gray-400 border-b border-gray-700">
-                <tr>
-                  <th className="py-2 px-3">Time</th>
-                  <th className="py-2 px-3">Blob</th>
-                  <th className="py-2 px-3">Operator</th>
-                  <th className="py-2 px-3">Status</th>
-                  <th className="py-2 px-3">Chunks</th>
-                  <th className="py-2 px-3">Latency</th>
-                  <th className="py-2 px-3">Error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent.map((p, i) => (
-                  <tr key={i} className="border-b border-gray-700/50 hover:bg-gray-700/30">
-                    <td className="py-2 px-3 text-gray-300 whitespace-nowrap">
-                      {new Date(p.probe_timestamp).toLocaleTimeString()}
-                    </td>
-                    <td className="py-2 px-3 font-mono text-gray-300">
-                      {p.blob_key.slice(0, 12)}...
-                    </td>
-                    <td className="py-2 px-3 font-mono text-gray-300">
-                      {p.operator_id.slice(0, 10)}...
-                    </td>
-                    <td className="py-2 px-3">
-                      {p.success ? (
-                        <span className="text-green-400 font-medium">OK</span>
-                      ) : (
-                        <span className="text-red-400 font-medium">FAIL</span>
-                      )}
-                    </td>
-                    <td className="py-2 px-3 text-gray-300">
-                      {p.chunks_returned ?? "-"}
-                    </td>
-                    <td className="py-2 px-3 text-gray-300">
-                      {p.latency_ms ? `${p.latency_ms}ms` : "-"}
-                    </td>
-                    <td className="py-2 px-3 text-gray-500 text-xs max-w-xs truncate">
-                      {p.error_message || ""}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+function MiniCard({ label, value, good }: { label: string; value: string; good?: boolean }) {
+  return (
+    <div className="rounded-lg border border-gray-700/30 bg-gray-900/50 p-3">
+      <p className="text-xs text-gray-500">{label}</p>
+      <p className={`text-lg font-bold mt-0.5 ${good === undefined ? "text-white" : good ? "text-green-400" : "text-red-400"}`}>
+        {value}
+      </p>
     </div>
   );
 }

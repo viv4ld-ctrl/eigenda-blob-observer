@@ -31,74 +31,166 @@ var ageGroups = []ageGroup{
 	{hoursAgo: 360, windowHours: 4, limit: 3},
 }
 
+const minChunksForRecovery = 1024
+
 type Prober struct {
-	api          *dataapi.Client
-	db           *db.DB
-	registry     *registry.RelayRegistry
-	relay        *relay.Client
-	opDiscovery  *operator.Discovery
-	opClient     *operator.Client
-	opSampleSize int
-	lastCursor   string // remember cursor for incremental collection
+	api         *dataapi.Client
+	db          *db.DB
+	registry    *registry.RelayRegistry
+	relay       *relay.Client
+	opDiscovery *operator.Discovery
+	opClient    *operator.Client
 }
 
 func New(api *dataapi.Client, database *db.DB, reg *registry.RelayRegistry, relayClient *relay.Client,
-	opDiscovery *operator.Discovery, opClient *operator.Client, opSampleSize int) *Prober {
+	opDiscovery *operator.Discovery, opClient *operator.Client) *Prober {
 	return &Prober{
-		api:          api,
-		db:           database,
-		registry:     reg,
-		relay:        relayClient,
-		opDiscovery:  opDiscovery,
-		opClient:     opClient,
-		opSampleSize: opSampleSize,
+		api:         api,
+		db:          database,
+		registry:    reg,
+		relay:       relayClient,
+		opDiscovery: opDiscovery,
+		opClient:    opClient,
 	}
 }
 
-func (p *Prober) RunCycle(ctx context.Context) {
-	start := time.Now()
-	log.Println("[prober] starting probe cycle")
-
-	// Phase 1: Collect ALL new blobs via cursor pagination
-	collected := p.collectBlobs(ctx)
-
-	// Phase 2: Pre-warm operator cache
+// Run starts three continuous goroutines: collector, verifier, re-verifier.
+func (p *Prober) Run(ctx context.Context) {
+	// Pre-warm operator cache
 	if p.opDiscovery != nil {
-		if _, err := p.opDiscovery.GetOperators(ctx); err != nil {
+		if ops, err := p.opDiscovery.GetOperators(ctx); err != nil {
 			log.Printf("[prober] operator cache warm failed: %v", err)
+		} else {
+			log.Printf("[prober] operator cache warmed: %d unique operators", len(ops))
 		}
 	}
 
-	// Phase 3: Probe unprobed blobs (relay + operator + attestation)
-	p.probeUnprobed(ctx)
+	var wg sync.WaitGroup
 
-	// Phase 4: Age-based re-verification
-	p.ageBasedReverify(ctx)
+	// Goroutine 1: Continuous blob collector
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runCollector(ctx)
+	}()
 
-	log.Printf("[prober] cycle complete in %s — collected %d blobs",
-		time.Since(start).Round(time.Millisecond), collected)
+	// Goroutine 2: Continuous verifier (relay + operator)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runVerifier(ctx)
+	}()
+
+	// Goroutine 3: Age-based re-verifier (every 5 minutes)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runReverifier(ctx)
+	}()
+
+	wg.Wait()
 }
 
-// collectBlobs fetches all new blobs since last cycle via cursor pagination.
+// runCollector continuously polls DataAPI for new blobs.
+func (p *Prober) runCollector(ctx context.Context) {
+	log.Println("[collector] started — polling DataAPI for new blobs")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		collected := p.collectBlobs(ctx)
+		if collected == 0 {
+			// No new blobs, wait a bit before polling again
+			time.Sleep(3 * time.Second)
+		} else {
+			// Brief pause to avoid hammering DataAPI
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+// runVerifier continuously picks unprobed blobs and verifies them.
+func (p *Prober) runVerifier(ctx context.Context) {
+	log.Println("[verifier] started — probing unverified blobs")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		unprobed, err := p.db.GetUnprobedBlobs(ctx, 5)
+		if err != nil {
+			log.Printf("[verifier] error: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if len(unprobed) == 0 {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		var wg sync.WaitGroup
+		for _, blob := range unprobed {
+			wg.Add(1)
+			go func(bk string, ra uint64) {
+				defer wg.Done()
+				p.probeBlob(ctx, bk, ra)
+				p.fetchAttestation(ctx, bk)
+
+				if p.opDiscovery != nil {
+					blobAgeHours := float64(time.Now().UnixNano()-int64(ra)) / float64(time.Hour)
+					p.probeAllOperators(ctx, bk, blobAgeHours)
+				}
+			}(blob.BlobKey, blob.RequestedAt)
+		}
+		wg.Wait()
+	}
+}
+
+// runReverifier periodically re-probes old blobs at specific age intervals.
+func (p *Prober) runReverifier(ctx context.Context) {
+	log.Println("[reverifier] started — checking aged blobs every 5m")
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once immediately
+	p.ageBasedReverify(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.ageBasedReverify(ctx)
+		}
+	}
+}
+
 func (p *Prober) collectBlobs(ctx context.Context) int {
 	total := 0
 	cursor := ""
-	maxPages := 10 // safety limit: 10 pages × 100 = 1000 blobs max per cycle
+	maxPages := 5
 
 	for page := 0; page < maxPages; page++ {
 		feed, err := p.api.FetchBlobFeed(100, cursor)
 		if err != nil {
-			log.Printf("[prober] error fetching blob feed page %d: %v", page, err)
+			if page == 0 {
+				log.Printf("[collector] error: %v", err)
+			}
 			break
 		}
-
 		if len(feed.Blobs) == 0 {
 			break
 		}
 
 		newCount := 0
 		for _, blob := range feed.Blobs {
-			observed := &db.ObservedBlob{
+			err := p.db.UpsertBlob(ctx, &db.ObservedBlob{
 				BlobKey:       blob.BlobKey,
 				AccountID:     blob.BlobMetadata.BlobHeader.PaymentMetadata.AccountID,
 				BlobStatus:    blob.BlobMetadata.BlobStatus,
@@ -108,91 +200,45 @@ func (p *Prober) collectBlobs(ctx context.Context) int {
 				CommitmentX:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.X,
 				CommitmentY:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.Y,
 				QuorumNumbers: blob.BlobMetadata.BlobHeader.QuorumNumbers,
-			}
-			if err := p.db.UpsertBlob(ctx, observed); err != nil {
-				log.Printf("[prober] error upserting blob %s: %v", blob.BlobKey, err)
-			} else {
+			})
+			if err == nil {
 				newCount++
 			}
 		}
 		total += newCount
 
-		// If we got fewer than requested, we've reached the end
-		if len(feed.Blobs) < 100 {
-			break
-		}
-
-		// Use cursor for next page
-		if feed.Cursor == "" {
+		if len(feed.Blobs) < 100 || feed.Cursor == "" {
 			break
 		}
 		cursor = feed.Cursor
 	}
 
-	log.Printf("[prober] collected %d blobs from DataAPI", total)
+	if total > 0 {
+		log.Printf("[collector] +%d blobs", total)
+	}
 	return total
 }
 
-// probeUnprobed picks unprobed blobs from DB and probes them.
-func (p *Prober) probeUnprobed(ctx context.Context) {
-	// Relay probe: up to 20 unprobed blobs
-	unprobed, err := p.db.GetUnprobedBlobs(ctx, 20)
-	if err != nil {
-		log.Printf("[prober] error getting unprobed blobs: %v", err)
-		return
-	}
-	if len(unprobed) == 0 {
-		return
-	}
-	log.Printf("[prober] probing %d unprobed blobs (relay + operator)", len(unprobed))
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
-
-	for _, blob := range unprobed {
-		wg.Add(1)
-		go func(bk string, ra uint64) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			p.probeBlob(ctx, bk, ra)
-			p.fetchAttestation(ctx, bk)
-
-			if p.opDiscovery != nil {
-				blobAgeHours := float64(time.Now().UnixNano()-int64(ra)) / float64(time.Hour)
-				p.probeOperators(ctx, bk, blobAgeHours)
-			}
-		}(blob.BlobKey, blob.RequestedAt)
-	}
-	wg.Wait()
-}
-
-// ageBasedReverify re-probes old blobs at specific age intervals.
 func (p *Prober) ageBasedReverify(ctx context.Context) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
-
 	for _, ag := range ageGroups {
 		aged, err := p.db.GetAgedBlobKeys(ctx, ag.hoursAgo, ag.windowHours, ag.limit)
 		if err != nil {
-			log.Printf("[prober] error getting aged blobs (%.0fh): %v", ag.hoursAgo, err)
 			continue
 		}
-		if len(aged) > 0 {
-			log.Printf("[prober] re-verifying %d blobs at age ~%.0fh", len(aged), ag.hoursAgo)
-			for _, ab := range aged {
-				wg.Add(1)
-				go func(bk string, ra uint64) {
-					defer wg.Done()
-					sem <- struct{}{}
-					defer func() { <-sem }()
-					p.probeBlob(ctx, bk, ra)
-				}(ab.BlobKey, ab.RequestedAt)
-			}
+		if len(aged) == 0 {
+			continue
 		}
+		log.Printf("[reverifier] re-verifying %d blobs at age ~%.0fh", len(aged), ag.hoursAgo)
+		var wg sync.WaitGroup
+		for _, ab := range aged {
+			wg.Add(1)
+			go func(bk string, ra uint64) {
+				defer wg.Done()
+				p.probeBlob(ctx, bk, ra)
+			}(ab.BlobKey, ab.RequestedAt)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 }
 
 func (p *Prober) probeBlob(ctx context.Context, blobKey string, requestedAt uint64) {
@@ -205,9 +251,8 @@ func (p *Prober) probeBlob(ctx context.Context, blobKey string, requestedAt uint
 	cert, err := p.api.FetchCertificate(blobKey)
 	if err != nil {
 		if strings.Contains(err.Error(), "HTTP 500") && strings.Contains(err.Error(), "certificate not found") {
-			return // too fresh, skip silently
+			return
 		}
-		log.Printf("[prober] error fetching certificate for %s: %v", blobKey[:16], err)
 		p.db.InsertProbeResult(ctx, &db.ProbeResult{
 			BlobKey: blobKey, BlobAgeHours: blobAgeHours,
 			RelayKey: -1, Success: false, ErrorMessage: err.Error(),
@@ -247,16 +292,13 @@ func (p *Prober) probeRelay(ctx context.Context, blobKey string, blobAgeHours fl
 	if !result.Success {
 		status = "FAIL"
 	}
-	log.Printf("[relay] %s blob=%s relay=%d age=%.1fh latency=%dms %s",
-		status, blobKey[:16], relayKey, blobAgeHours, result.LatencyMs, result.Error)
+	log.Printf("[relay] %s blob=%s relay=%d latency=%dms",
+		status, blobKey[:16], relayKey, result.LatencyMs)
 }
 
 func (p *Prober) fetchAttestation(ctx context.Context, blobKey string) {
 	att, err := p.api.FetchAttestationInfo(blobKey)
 	if err != nil {
-		if !strings.Contains(err.Error(), "HTTP 500") {
-			log.Printf("[prober] attestation fetch failed for %s: %v", blobKey[:16], err)
-		}
 		return
 	}
 
@@ -270,40 +312,51 @@ func (p *Prober) fetchAttestation(ctx context.Context, blobKey string) {
 	}
 }
 
-func (p *Prober) probeOperators(ctx context.Context, blobKey string, blobAgeHours float64) {
+func (p *Prober) probeAllOperators(ctx context.Context, blobKey string, blobAgeHours float64) {
 	if p.opDiscovery == nil || p.opClient == nil {
 		return
 	}
 
-	operators, err := p.opDiscovery.SampleOperators(ctx, p.opSampleSize)
+	allOperators, err := p.opDiscovery.GetOperators(ctx)
 	if err != nil {
-		log.Printf("[prober] operator discovery error: %v", err)
 		return
 	}
 
-	var wg sync.WaitGroup
-	for _, op := range operators {
-		wg.Add(1)
-		go func(o operator.OperatorInfo) {
-			defer wg.Done()
-			result := p.opClient.ProbeChunks(ctx, o.Socket, blobKey, 0)
-			opIDHex := hex.EncodeToString(o.OperatorID[:8])
+	totalChunks := 0
+	okCount := 0
+	failCount := 0
 
-			p.db.InsertOperatorProbe(ctx, &db.OperatorProbeResult{
-				BlobKey: blobKey, BlobAgeHours: blobAgeHours,
-				OperatorID: opIDHex, OperatorSocket: o.Socket,
-				QuorumID: 0, Success: result.Success,
-				LatencyMs: result.LatencyMs, ChunksReturned: result.ChunksReturned,
-				ErrorMessage: result.Error,
-			})
+	for _, op := range allOperators {
+		r := p.opClient.ProbeChunks(ctx, op.Socket, blobKey, 0)
+		opIDHex := hex.EncodeToString(op.OperatorID[:8])
 
-			status := "OK"
-			if !result.Success {
-				status = "FAIL"
-			}
-			log.Printf("[operator] %s op=%s chunks=%d latency=%dms %s",
-				status, opIDHex, result.ChunksReturned, result.LatencyMs, result.Error)
-		}(op)
+		p.db.InsertOperatorProbe(ctx, &db.OperatorProbeResult{
+			BlobKey: blobKey, BlobAgeHours: blobAgeHours,
+			OperatorID: opIDHex, OperatorSocket: op.Socket,
+			QuorumID: 0, Success: r.Success,
+			LatencyMs: r.LatencyMs, ChunksReturned: r.ChunksReturned,
+			ErrorMessage: r.Error,
+		})
+
+		if r.Success {
+			okCount++
+			totalChunks += r.ChunksReturned
+		} else {
+			failCount++
+		}
+
+		// Enough chunks confirmed — blob is recoverable, stop early
+		if totalChunks >= minChunksForRecovery {
+			break
+		}
 	}
-	wg.Wait()
+
+	recoverable := "RECOVERABLE"
+	if totalChunks < minChunksForRecovery {
+		recoverable = "AT_RISK"
+	}
+
+	log.Printf("[recovery] blob=%s probed=%d ok=%d fail=%d chunks=%d/%d %s",
+		blobKey[:16], okCount+failCount, okCount, failCount,
+		totalChunks, minChunksForRecovery, recoverable)
 }

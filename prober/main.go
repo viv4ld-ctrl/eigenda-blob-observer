@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/joho/godotenv"
 
@@ -20,7 +19,6 @@ import (
 )
 
 func main() {
-	// Load .env from current dir or parent dir
 	if err := godotenv.Load(); err != nil {
 		_ = godotenv.Load("../.env")
 	}
@@ -28,7 +26,6 @@ func main() {
 	cfg := config.Load()
 
 	log.Println("starting eigenda blob observer prober")
-	log.Printf("probe interval: %s", cfg.ProbeInterval)
 	log.Printf("dataapi: %s", cfg.DataAPIBaseURL)
 
 	// DB
@@ -46,24 +43,23 @@ func main() {
 	}
 	log.Println("database migrations complete")
 
-	// DataAPI client
+	// DataAPI
 	apiClient := dataapi.NewClient(cfg.DataAPIBaseURL)
 
-	// Relay registry (resolved dynamically from EigenDADirectory)
+	// Relay registry
 	var reg *registry.RelayRegistry
 	if cfg.EthRPCURL != "" && cfg.EigenDADirectory != "" {
 		reg, err = registry.NewFromDirectory(cfg.EthRPCURL, cfg.EigenDADirectory)
 		if err != nil {
-			log.Fatalf("failed to resolve relay registry from directory: %v", err)
+			log.Fatalf("failed to resolve relay registry: %v", err)
 		}
 		defer reg.Close()
-		log.Printf("resolved EigenDARelayRegistry at %s from directory %s",
-			reg.RegistryAddress().Hex(), cfg.EigenDADirectory)
+		log.Printf("resolved EigenDARelayRegistry at %s", reg.RegistryAddress().Hex())
 	} else {
 		log.Println("WARNING: ETH_RPC_URL or EIGENDA_DIRECTORY not set, relay probing disabled")
 	}
 
-	// Relay gRPC client
+	// Relay client
 	relayClient := relay.NewClient()
 
 	// Operator discovery + client
@@ -72,37 +68,26 @@ func main() {
 	if cfg.OperatorProbeEnabled && cfg.EthRPCURL != "" && cfg.EigenDADirectory != "" {
 		opDiscovery, err = operator.NewDiscovery(cfg.EthRPCURL, cfg.EigenDADirectory)
 		if err != nil {
-			log.Printf("WARNING: failed to init operator discovery: %v", err)
+			log.Printf("WARNING: operator discovery failed: %v", err)
 		} else {
 			defer opDiscovery.Close()
 			opClient = operator.NewClient()
-			log.Printf("operator probing enabled (sample size: %d)", cfg.OperatorSampleSize)
+			log.Println("operator probing enabled (full scan per blob)")
 		}
 	}
 
-	// Prober
-	p := prober.New(apiClient, database, reg, relayClient, opDiscovery, opClient, cfg.OperatorSampleSize)
+	// Prober — runs continuously
+	p := prober.New(apiClient, database, reg, relayClient, opDiscovery, opClient)
 
-	// Run first cycle immediately
-	p.RunCycle(ctx)
-
-	// Scheduler
-	ticker := time.NewTicker(cfg.ProbeInterval)
-	defer ticker.Stop()
-
+	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Printf("scheduler started, next probe in %s", cfg.ProbeInterval)
+	go func() {
+		sig := <-sigCh
+		log.Printf("received %s, shutting down", sig)
+		cancel()
+	}()
 
-	for {
-		select {
-		case <-ticker.C:
-			p.RunCycle(ctx)
-		case sig := <-sigCh:
-			log.Printf("received signal %s, shutting down", sig)
-			cancel()
-			return
-		}
-	}
+	p.Run(ctx)
 }

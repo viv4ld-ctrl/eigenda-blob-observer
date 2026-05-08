@@ -22,7 +22,7 @@ func Load() *Config {
 		interval = 5 * time.Minute
 	}
 
-	sampleSize, _ := strconv.Atoi(getEnv("OPERATOR_SAMPLE_SIZE", "3"))
+	sampleSize, _ := strconv.Atoi(getEnv("OPERATOR_SAMPLE_SIZE", "15"))
 
 	return &Config{
 		DatabaseURL:          getEnv("DATABASE_URL", "postgres://observer:observer_pass@localhost:5432/eigenda_observer?sslmode=disable"),
