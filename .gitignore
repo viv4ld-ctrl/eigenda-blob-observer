@@ -1,0 +1,21 @@
+# Environment
+.env
+
+# Go
+prober/prober
+
+# Node
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Docker
+pgdata/
