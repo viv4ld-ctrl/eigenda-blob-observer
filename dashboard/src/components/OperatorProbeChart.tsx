@@ -14,10 +14,18 @@ interface RecoveryDetail {
   recoverable: boolean;
 }
 
+interface DeadOperator {
+  operator_id: string;
+  operator_socket: string;
+  total_probes: string;
+  last_error: string;
+}
+
 interface ApiResponse {
-  stats: { total: number; successes: number; success_rate: number; avg_latency: number };
+  stats: { total: number; success_rate: number; avg_latency: number };
   recovery: { blobs_checked: number; blobs_recoverable: number; recovery_rate: number; details: RecoveryDetail[] };
   operators: { operator_id: string; success_rate: string; avg_chunks: string; total: string }[];
+  dead_operators: DeadOperator[];
 }
 
 export default function OperatorProbeChart() {
@@ -31,43 +39,42 @@ export default function OperatorProbeChart() {
   }, []);
 
   if (!d) return null;
-  const { recovery, operators } = d;
+  const { recovery, operators, dead_operators } = d;
 
-  const chartData = operators.map((o) => ({
-    op: o.operator_id.slice(0, 6),
-    chunks: parseFloat(o.avg_chunks || "0"),
-    rate: parseFloat(o.success_rate),
-  }));
+  const chartData = operators
+    .filter(o => parseFloat(o.total) >= 3)
+    .map((o) => ({
+      op: o.operator_id.slice(0, 6),
+      chunks: parseFloat(o.avg_chunks || "0"),
+      rate: parseFloat(o.success_rate),
+    }));
 
   return (
     <div className="space-y-4">
-      {/* Recovery summary */}
+      {/* Recovery */}
       <div className="rounded-lg bg-zinc-900/60 border border-zinc-800/30 p-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium text-zinc-300">Blob Recoverability</h2>
-          <div className="flex items-center gap-4 text-xs text-zinc-500">
-            <span>checked: {recovery.blobs_checked}</span>
-            <span className={recovery.recovery_rate >= 95 ? "text-emerald-400" : "text-red-400"}>
-              {recovery.recovery_rate.toFixed(0)}% recoverable
-            </span>
-          </div>
+          <span className={`text-xs font-medium ${recovery.recovery_rate >= 95 ? "text-emerald-400" : "text-red-400"}`}>
+            {recovery.blobs_recoverable}/{recovery.blobs_checked} recoverable
+          </span>
         </div>
 
         {recovery.details.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-1.5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-1.5">
             {recovery.details.slice(0, 10).map((r, i) => {
               const chunks = parseInt(r.total_chunks || "0");
               const pct = Math.min(100, (chunks / 1024) * 100);
               return (
-                <div key={i} className="relative px-3 py-2 rounded bg-zinc-800/50 overflow-hidden">
+                <div key={i} className="relative px-2.5 py-1.5 rounded bg-zinc-800/40 overflow-hidden">
                   <div
-                    className={`absolute inset-y-0 left-0 ${r.recoverable ? "bg-emerald-500/10" : "bg-red-500/10"}`}
+                    className={`absolute inset-y-0 left-0 ${r.recoverable ? "bg-emerald-500/8" : "bg-red-500/8"}`}
                     style={{ width: `${pct}%` }}
                   />
                   <div className="relative flex items-center justify-between">
-                    <span className="font-mono text-[10px] text-zinc-500">{r.blob_key.slice(0, 10)}</span>
-                    <span className={`text-[10px] font-medium ${r.recoverable ? "text-emerald-400" : "text-red-400"}`}>
-                      {chunks}/{1024}
+                    <span className="font-mono text-[9px] text-zinc-600">{r.blob_key.slice(0, 8)}</span>
+                    <span className={`text-[9px] tabular-nums ${r.recoverable ? "text-emerald-500" : "text-red-400"}`}>
+                      {chunks}
                     </span>
                   </div>
                 </div>
@@ -76,6 +83,43 @@ export default function OperatorProbeChart() {
           </div>
         )}
       </div>
+
+      {/* Dead Operators */}
+      {dead_operators.length > 0 && (
+        <div className="rounded-lg bg-red-950/20 border border-red-900/20 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium text-red-400">
+              Unresponsive Operators
+            </h2>
+            <span className="text-xs text-red-400/60">
+              {dead_operators.length}/{operators.length} operators ({((dead_operators.length / operators.length) * 100).toFixed(0)}%)
+            </span>
+          </div>
+          <div className="space-y-1">
+            {dead_operators.map((op, i) => {
+              const socket = op.operator_socket.split(";").pop() || op.operator_socket;
+              const host = op.operator_socket.split(":")[0];
+              const errorType = op.last_error.includes("connection refused") ? "refused" : "timeout";
+              return (
+                <div key={i} className="flex items-center justify-between px-3 py-1.5 rounded bg-zinc-900/40 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    <span className="font-mono text-zinc-400">{op.operator_id.slice(0, 12)}</span>
+                    <span className="text-zinc-600">{host}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-zinc-600">{op.total_probes} probes</span>
+                    <span className="text-red-400/80">{errorType}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-red-400/40 mt-2">
+            These operators are registered on-chain but not serving chunk data. Not slashed or ejected.
+          </p>
+        </div>
+      )}
 
       {/* Operator chunks chart */}
       {chartData.length > 0 && (

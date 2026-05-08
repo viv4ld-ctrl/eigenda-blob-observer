@@ -310,15 +310,8 @@ func (p *Prober) probeAllOperators(ctx context.Context, blobKey string, blobAgeH
 	totalChunks := 0
 	okCount := 0
 	failCount := 0
-	skipped := 0
 
 	for _, op := range allOperators {
-		// Skip operators that are consistently unreachable
-		if p.opDiscovery.IsBlacklisted(op.OperatorID) {
-			skipped++
-			continue
-		}
-
 		r := p.opClient.ProbeChunks(ctx, op.Socket, blobKey, 0)
 		opIDHex := hex.EncodeToString(op.OperatorID[:8])
 
@@ -330,17 +323,11 @@ func (p *Prober) probeAllOperators(ctx context.Context, blobKey string, blobAgeH
 			ErrorMessage: r.Error,
 		})
 
-		p.opDiscovery.ReportResult(op.OperatorID, r.Success)
-
 		if r.Success {
 			okCount++
 			totalChunks += r.ChunksReturned
 		} else {
 			failCount++
-		}
-
-		if totalChunks >= minChunksForRecovery {
-			break
 		}
 	}
 
@@ -348,6 +335,6 @@ func (p *Prober) probeAllOperators(ctx context.Context, blobKey string, blobAgeH
 	if totalChunks < minChunksForRecovery {
 		tag = "AT_RISK"
 	}
-	log.Printf("[recovery] blob=%s probed=%d ok=%d skip=%d chunks=%d/%d %s",
-		blobKey[:12], okCount+failCount, okCount, skipped, totalChunks, minChunksForRecovery, tag)
+	log.Printf("[recovery] blob=%s operators=%d/%d chunks=%d/%d %s",
+		blobKey[:12], okCount, okCount+failCount, totalChunks, minChunksForRecovery, tag)
 }

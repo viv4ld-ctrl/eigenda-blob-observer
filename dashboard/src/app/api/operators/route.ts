@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 
 export async function GET() {
-  // Overall operator probe stats (24h)
   const [stats] = await query(`
     SELECT
       COUNT(*) AS total,
@@ -14,7 +13,7 @@ export async function GET() {
     WHERE probe_timestamp > NOW() - INTERVAL '24 hours'
   `);
 
-  // Recoverability: per-blob chunk totals for recently probed blobs
+  // Recoverability per blob
   const recoverability = await query(`
     SELECT
       blob_key,
@@ -33,9 +32,8 @@ export async function GET() {
   const recoverableCount = recoverability.filter(
     (r: Record<string, unknown>) => r.recoverable === true
   ).length;
-  const totalBlobs = recoverability.length;
 
-  // Per-operator stats (all time, top 30)
+  // Per-operator stats (all operators)
   const operators = await query(`
     SELECT
       operator_id,
@@ -48,8 +46,25 @@ export async function GET() {
       AVG(chunks_returned) FILTER (WHERE success = true) AS avg_chunks
     FROM operator_probes
     GROUP BY operator_id, operator_socket
-    ORDER BY total DESC
-    LIMIT 30
+    ORDER BY success_rate ASC, total DESC
+  `);
+
+  // Dead operators (100% failure rate, 5+ probes)
+  const deadOperators = await query(`
+    SELECT
+      operator_id,
+      operator_socket,
+      COUNT(*) AS total_probes,
+      MAX(error_message) AS last_error,
+      MAX(probe_timestamp) AS last_seen
+    FROM operator_probes
+    WHERE success = false
+    GROUP BY operator_id, operator_socket
+    HAVING COUNT(*) = (
+      SELECT COUNT(*) FROM operator_probes op2
+      WHERE op2.operator_id = operator_probes.operator_id
+    ) AND COUNT(*) >= 5
+    ORDER BY total_probes DESC
   `);
 
   return NextResponse.json({
@@ -60,11 +75,12 @@ export async function GET() {
       avg_latency: parseFloat(stats?.avg_latency ?? "0"),
     },
     recovery: {
-      blobs_checked: totalBlobs,
+      blobs_checked: recoverability.length,
       blobs_recoverable: recoverableCount,
-      recovery_rate: totalBlobs > 0 ? (recoverableCount / totalBlobs) * 100 : 0,
+      recovery_rate: recoverability.length > 0 ? (recoverableCount / recoverability.length) * 100 : 0,
       details: recoverability,
     },
     operators,
+    dead_operators: deadOperators,
   });
 }
