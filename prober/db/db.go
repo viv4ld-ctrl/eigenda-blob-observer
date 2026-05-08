@@ -175,6 +175,54 @@ func (d *DB) InsertAttestation(ctx context.Context, a *AttestationSnapshot) erro
 	return err
 }
 
+// GetUnprobedBlobs returns blob keys that have no retrieval_probes yet.
+func (d *DB) GetUnprobedBlobs(ctx context.Context, limit int) ([]AgedBlobKey, error) {
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT ob.blob_key, ob.requested_at FROM observed_blobs ob
+		LEFT JOIN retrieval_probes rp ON ob.blob_key = rp.blob_key
+		WHERE rp.blob_key IS NULL
+		ORDER BY ob.requested_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []AgedBlobKey
+	for rows.Next() {
+		var bk AgedBlobKey
+		if err := rows.Scan(&bk.BlobKey, &bk.RequestedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, bk)
+	}
+	return results, rows.Err()
+}
+
+// GetUnprobedOperatorBlobs returns blob keys that have no operator_probes yet.
+func (d *DB) GetUnprobedOperatorBlobs(ctx context.Context, limit int) ([]AgedBlobKey, error) {
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT ob.blob_key, ob.requested_at FROM observed_blobs ob
+		LEFT JOIN operator_probes op ON ob.blob_key = op.blob_key
+		WHERE op.blob_key IS NULL
+		ORDER BY ob.requested_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []AgedBlobKey
+	for rows.Next() {
+		var bk AgedBlobKey
+		if err := rows.Scan(&bk.BlobKey, &bk.RequestedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, bk)
+	}
+	return results, rows.Err()
+}
+
 // GetAgedBlobKeys returns blob keys that were requested approximately `hoursAgo` hours ago.
 // windowHours defines the +/- window around the target age.
 func (d *DB) GetAgedBlobKeys(ctx context.Context, hoursAgo float64, windowHours float64, limit int) ([]AgedBlobKey, error) {

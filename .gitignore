@@ -1,8 +1,8 @@
 # Environment
 .env
 
-# Go
-prober/prober
+# Go binary
+/prober/eigenda-prober
 
 # Node
 dashboard/node_modules/

@@ -1,6 +1,6 @@
 # EigenDA Mainnet Blob Observer
 
-EigenDA 메인넷의 타인 blob을 주기적으로 샘플링하고, **relay retrieve + operator 직접 chunk 검증**을 수행하여 대시보드로 시각화하는 독립 감시 도구.
+EigenDA 메인넷에 올라오는 **모든 blob을 실시간 수집**하고, **relay retrieve + operator 직접 chunk 검증**을 수행하여 대시보드로 시각화하는 독립 감시 도구.
 
 ## 뭘 검증하나?
 
@@ -15,12 +15,18 @@ EigenDA 메인넷의 타인 blob을 주기적으로 샘플링하고, **relay ret
 ## 아키텍처
 
 ```
-[Go Prober] ─── DataAPI (blob feed, certificate, attestation)
+[Go Prober]
     │
-    ├── Relay (gRPC GetBlob) ──── 전체 blob retrieve 검증
+    ├── Phase 1: 수집 ─── DataAPI cursor 페이지네이션으로 전수 수집
+    │     └── 매 사이클 ~300개 blob 메타데이터 → DB 저장 (1-2초)
     │
-    ├── Operator (gRPC GetChunks) ──── 직접 chunk 보유 검증
-    │     └── 58개 operator 중 랜덤 3개 샘플링/blob
+    ├── Phase 2: 검증 ─── DB에서 미검증 blob 20개씩 꺼내서 처리
+    │     ├── Relay (gRPC GetBlob) ──── 전체 blob retrieve
+    │     ├── Operator (gRPC GetChunks) ──── 직접 chunk 보유 검증
+    │     │     └── 58개 operator 중 랜덤 3개 샘플링/blob
+    │     └── Attestation ──── 쿼럼 서명 참여율
+    │
+    ├── Phase 3: 재검증 ─── 과거 blob 나이별 re-probe
     │
     ├── L1 Contract ──── EigenDADirectory → RelayRegistry, SocketRegistry
     │
@@ -68,11 +74,11 @@ go run .
 
 정상 동작 시 로그:
 ```
-[registry] resolved relay registry via directory name "RELAY_REGISTRY" → 0xD160...
-[operator] discovered 58 operators with sockets for quorum 0
-[prober]   OK blob=6ddac263... relay=0 latency=2299ms
-[operator] OK op=3278d7a1... socket=38.84.0.67:32007 chunks=1 latency=572ms
-[operator] OK op=29ef6b67... socket=84.207.214.244:32007 chunks=909 latency=2758ms
+[prober]   collected 1000 blobs from DataAPI          ← 전수 수집
+[prober]   probing 20 unprobed blobs (relay + operator)
+[relay]    OK blob=acf883fe... relay=0 latency=2103ms  ← relay 검증
+[operator] OK op=29ef6b67... chunks=909 latency=2877ms ← operator chunk 검증
+[operator] OK op=3278d7a1... chunks=1 latency=479ms
 ```
 
 ### 5. Dashboard 실행
@@ -105,6 +111,18 @@ EigenDADirectory (0x64AB...)
 ```
 
 하드코딩 없이 Directory에서 동적으로 해석. EigenDA가 컨트랙트를 업그레이드해도 코드 수정 불필요.
+
+## 수집/검증 분리 구조
+
+```
+수집: 매 5분마다 cursor 페이지네이션으로 새 blob 전수 수집 → DB
+      (페이지당 100개, 최대 1000개/사이클)
+
+검증: DB에서 "아직 probe 안 한 blob" 20개씩 꺼내서 검증
+      → 다음 사이클에 또 20개 → 천천히 전부 소화
+
+= 메인넷 모든 blob 메타데이터 보존 + 검증은 부하 없이 점진적 처리
+```
 
 ## 나이별 재검증 (Survival Curve)
 
