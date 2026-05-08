@@ -89,10 +89,13 @@ type Discovery struct {
 	idxRegistryAddr    common.Address
 	socketRegistryAddr common.Address
 
-	mu    sync.RWMutex
-	cache []OperatorInfo
+	mu        sync.RWMutex
+	cache     []OperatorInfo
 	cacheTime time.Time
-	ttl   time.Duration
+	ttl       time.Duration
+
+	failMu   sync.RWMutex
+	failCount map[[32]byte]int // consecutive failures per operator
 }
 
 func NewDiscovery(ethRPCURL string, directoryAddress string) (*Discovery, error) {
@@ -115,12 +118,13 @@ func NewDiscovery(ethRPCURL string, directoryAddress string) (*Discovery, error)
 	}
 
 	d := &Discovery{
-		client:  client,
-		dirAddr: common.HexToAddress(directoryAddress),
-		dirABI:  dirABI,
-		idxABI:  idxABI,
+		client:    client,
+		dirAddr:   common.HexToAddress(directoryAddress),
+		dirABI:    dirABI,
+		idxABI:    idxABI,
 		socketABI: sockABI,
-		ttl:     1 * time.Hour,
+		ttl:       1 * time.Hour,
+		failCount: make(map[[32]byte]int),
 	}
 
 	// Resolve contract addresses from directory
@@ -334,6 +338,40 @@ func (d *Discovery) getOperatorSocket(ctx context.Context, operatorID [32]byte) 
 		return "", fmt.Errorf("unexpected type")
 	}
 	return socket, nil
+}
+
+const blacklistThreshold = 5 // skip after 5 consecutive failures
+
+// ReportResult tracks consecutive failures per operator.
+// Call after each probe to update the blacklist.
+func (d *Discovery) ReportResult(opID [32]byte, success bool) {
+	d.failMu.Lock()
+	defer d.failMu.Unlock()
+	if success {
+		delete(d.failCount, opID)
+	} else {
+		d.failCount[opID]++
+	}
+}
+
+// IsBlacklisted returns true if the operator has failed too many times consecutively.
+func (d *Discovery) IsBlacklisted(opID [32]byte) bool {
+	d.failMu.RLock()
+	defer d.failMu.RUnlock()
+	return d.failCount[opID] >= blacklistThreshold
+}
+
+// BlacklistedCount returns how many operators are currently blacklisted.
+func (d *Discovery) BlacklistedCount() int {
+	d.failMu.RLock()
+	defer d.failMu.RUnlock()
+	count := 0
+	for _, v := range d.failCount {
+		if v >= blacklistThreshold {
+			count++
+		}
+	}
+	return count
 }
 
 func (d *Discovery) Close() {
