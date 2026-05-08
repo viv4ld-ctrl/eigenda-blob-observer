@@ -8,30 +8,40 @@ import ProbeLog from "@/components/ProbeLog";
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-gray-900 text-white p-6">
-      <header className="mb-8">
-        <h1 className="text-3xl font-bold">EigenDA Blob Observer</h1>
-        <p className="text-gray-400 mt-1">
-          Mainnet blob retrieval monitoring dashboard
-        </p>
-      </header>
+    <main className="min-h-screen bg-gray-950 text-white">
+      <div className="max-w-[1400px] mx-auto px-6 py-6">
+        <header className="mb-6">
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-2xl font-bold tracking-tight">
+              EigenDA Blob Observer
+            </h1>
+            <span className="text-xs text-gray-600 font-mono">mainnet</span>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Real-time blob collection + relay & operator chunk verification
+          </p>
+        </header>
 
-      <div className="space-y-6">
-        <StatusCards />
+        <div className="space-y-5">
+          <StatusCards />
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <SurvivalCurve />
-          <LatencyChart />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <SurvivalCurve />
+            <LatencyChart />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <RelaySuccessRate />
+            <AttestationChart />
+          </div>
+
+          <OperatorProbeChart />
+          <ProbeLog />
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <RelaySuccessRate />
-          <AttestationChart />
-        </div>
-
-        <OperatorProbeChart />
-
-        <ProbeLog />
+        <footer className="mt-8 pb-6 text-center text-xs text-gray-700">
+          Independent EigenDA mainnet observer. Not affiliated with Eigen Labs.
+        </footer>
       </div>
     </main>
   );

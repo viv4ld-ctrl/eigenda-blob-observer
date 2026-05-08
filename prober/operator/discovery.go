@@ -164,7 +164,7 @@ func (d *Discovery) resolveAddress(ctx context.Context, name string) (common.Add
 	return addr, nil
 }
 
-// GetOperators returns the current operator set for quorum 0.
+// GetOperators returns the deduplicated operator set across all active quorums.
 // Results are cached for 1 hour.
 func (d *Discovery) GetOperators(ctx context.Context) ([]OperatorInfo, error) {
 	d.mu.RLock()
@@ -175,17 +175,38 @@ func (d *Discovery) GetOperators(ctx context.Context) ([]OperatorInfo, error) {
 	}
 	d.mu.RUnlock()
 
-	operators, err := d.fetchOperators(ctx, 0) // quorum 0
-	if err != nil {
-		return nil, err
+	// Fetch operators from all quorums and deduplicate by operator ID
+	seen := make(map[[32]byte]bool)
+	var allOperators []OperatorInfo
+
+	for q := uint8(0); q < 10; q++ {
+		operators, err := d.fetchOperators(ctx, q)
+		if err != nil {
+			break // quorum doesn't exist, stop
+		}
+		if len(operators) == 0 {
+			continue
+		}
+		for _, op := range operators {
+			if !seen[op.OperatorID] {
+				seen[op.OperatorID] = true
+				allOperators = append(allOperators, op)
+			}
+		}
 	}
 
+	if len(allOperators) == 0 {
+		return nil, fmt.Errorf("no operators found across any quorum")
+	}
+
+	log.Printf("[operator] total unique operators across all quorums: %d", len(allOperators))
+
 	d.mu.Lock()
-	d.cache = operators
+	d.cache = allOperators
 	d.cacheTime = time.Now()
 	d.mu.Unlock()
 
-	return operators, nil
+	return allOperators, nil
 }
 
 // SampleOperators returns a random subset of operators.
