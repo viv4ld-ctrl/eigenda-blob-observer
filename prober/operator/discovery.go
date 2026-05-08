@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -173,8 +174,15 @@ func (d *Discovery) resolveAddress(ctx context.Context, name string) (common.Add
 func (d *Discovery) GetOperators(ctx context.Context) ([]OperatorInfo, error) {
 	d.mu.RLock()
 	if len(d.cache) > 0 && time.Since(d.cacheTime) < d.ttl {
-		result := d.cache
+		result := make([]OperatorInfo, len(d.cache))
+		copy(result, d.cache)
 		d.mu.RUnlock()
+		// Re-sort by current fail counts (healthy first)
+		d.failMu.RLock()
+		sort.SliceStable(result, func(i, j int) bool {
+			return d.failCount[result[i].OperatorID] < d.failCount[result[j].OperatorID]
+		})
+		d.failMu.RUnlock()
 		return result, nil
 	}
 	d.mu.RUnlock()
@@ -202,6 +210,13 @@ func (d *Discovery) GetOperators(ctx context.Context) ([]OperatorInfo, error) {
 	if len(allOperators) == 0 {
 		return nil, fmt.Errorf("no operators found across any quorum")
 	}
+
+	// Sort: healthy operators first, unresponsive last (faster probe cycle)
+	d.failMu.RLock()
+	sort.SliceStable(allOperators, func(i, j int) bool {
+		return d.failCount[allOperators[i].OperatorID] < d.failCount[allOperators[j].OperatorID]
+	})
+	d.failMu.RUnlock()
 
 	log.Printf("[operator] total unique operators across all quorums: %d", len(allOperators))
 
