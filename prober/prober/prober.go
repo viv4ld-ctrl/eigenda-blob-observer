@@ -34,12 +34,13 @@ var ageGroups = []ageGroup{
 const minChunksForRecovery = 1024
 
 type Prober struct {
-	api         *dataapi.Client
-	db          *db.DB
-	registry    *registry.RelayRegistry
-	relay       *relay.Client
-	opDiscovery *operator.Discovery
-	opClient    *operator.Client
+	api                *dataapi.Client
+	db                 *db.DB
+	registry           *registry.RelayRegistry
+	relay              *relay.Client
+	opDiscovery        *operator.Discovery
+	opClient           *operator.Client
+	lastSeenTimestamp   uint64
 }
 
 func New(api *dataapi.Client, database *db.DB, reg *registry.RelayRegistry, relayClient *relay.Client,
@@ -101,44 +102,46 @@ func (p *Prober) runCollector(ctx context.Context) {
 }
 
 func (p *Prober) collectBlobs(ctx context.Context) int {
-	total := 0
-	cursor := ""
-	for page := 0; page < 5; page++ {
-		feed, err := p.api.FetchBlobFeed(100, cursor)
-		if err != nil {
-			if page == 0 {
-				log.Printf("[collector] error: %v", err)
-			}
-			break
-		}
-		if len(feed.Blobs) == 0 {
-			break
-		}
-		for _, blob := range feed.Blobs {
-			err := p.db.UpsertBlob(ctx, &db.ObservedBlob{
-				BlobKey:       blob.BlobKey,
-				AccountID:     blob.BlobMetadata.BlobHeader.PaymentMetadata.AccountID,
-				BlobStatus:    blob.BlobMetadata.BlobStatus,
-				BlobSizeBytes: blob.BlobMetadata.BlobSizeBytes,
-				RequestedAt:   blob.BlobMetadata.RequestedAt,
-				ExpiryUnixSec: blob.BlobMetadata.ExpiryUnixSec,
-				CommitmentX:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.X,
-				CommitmentY:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.Y,
-				QuorumNumbers: blob.BlobMetadata.BlobHeader.QuorumNumbers,
-			})
-			if err == nil {
-				total++
-			}
-		}
-		if len(feed.Blobs) < 100 || feed.Cursor == "" {
-			break
-		}
-		cursor = feed.Cursor
+	feed, err := p.api.FetchBlobFeed(100, "")
+	if err != nil {
+		log.Printf("[collector] error: %v", err)
+		return 0
 	}
-	if total > 0 {
-		log.Printf("[collector] +%d blobs", total)
+	if len(feed.Blobs) == 0 {
+		return 0
 	}
-	return total
+
+	newCount := 0
+	for _, blob := range feed.Blobs {
+		// Stop when we hit a blob we've already seen (feed is newest-first)
+		if blob.BlobMetadata.RequestedAt <= p.lastSeenTimestamp {
+			break
+		}
+		err := p.db.UpsertBlob(ctx, &db.ObservedBlob{
+			BlobKey:       blob.BlobKey,
+			AccountID:     blob.BlobMetadata.BlobHeader.PaymentMetadata.AccountID,
+			BlobStatus:    blob.BlobMetadata.BlobStatus,
+			BlobSizeBytes: blob.BlobMetadata.BlobSizeBytes,
+			RequestedAt:   blob.BlobMetadata.RequestedAt,
+			ExpiryUnixSec: blob.BlobMetadata.ExpiryUnixSec,
+			CommitmentX:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.X,
+			CommitmentY:   blob.BlobMetadata.BlobHeader.BlobCommitments.Commitment.Y,
+			QuorumNumbers: blob.BlobMetadata.BlobHeader.QuorumNumbers,
+		})
+		if err == nil {
+			newCount++
+		}
+	}
+
+	// Remember the newest blob's timestamp
+	if feed.Blobs[0].BlobMetadata.RequestedAt > p.lastSeenTimestamp {
+		p.lastSeenTimestamp = feed.Blobs[0].BlobMetadata.RequestedAt
+	}
+
+	if newCount > 0 {
+		log.Printf("[collector] +%d new blobs", newCount)
+	}
+	return newCount
 }
 
 // --- Goroutine 2: Relay Verifier (fast, near-full coverage) ---
