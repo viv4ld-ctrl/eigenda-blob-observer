@@ -2,25 +2,9 @@
 
 import { useEffect, useState } from "react";
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Cell,
 } from "recharts";
-
-interface OperatorStats {
-  operator_id: string;
-  operator_socket: string;
-  total: string;
-  successes: string;
-  success_rate: string;
-  avg_latency: string;
-  avg_chunks: string;
-}
 
 interface RecoveryDetail {
   blob_key: string;
@@ -30,160 +14,91 @@ interface RecoveryDetail {
   recoverable: boolean;
 }
 
-interface RecoveryStats {
-  blobs_checked: number;
-  blobs_recoverable: number;
-  recovery_rate: number;
-  details: RecoveryDetail[];
-}
-
-interface OverallStats {
-  total: number;
-  successes: number;
-  success_rate: number;
-  avg_latency: number;
-}
-
 interface ApiResponse {
-  stats: OverallStats;
-  recovery: RecoveryStats;
-  operators: OperatorStats[];
+  stats: { total: number; successes: number; success_rate: number; avg_latency: number };
+  recovery: { blobs_checked: number; blobs_recoverable: number; recovery_rate: number; details: RecoveryDetail[] };
+  operators: { operator_id: string; success_rate: string; avg_chunks: string; total: string }[];
 }
 
 export default function OperatorProbeChart() {
-  const [data, setData] = useState<ApiResponse | null>(null);
+  const [d, setD] = useState<ApiResponse | null>(null);
 
   useEffect(() => {
-    const f = async () => {
-      const res = await fetch("/api/operators");
-      setData(await res.json());
-    };
+    const f = async () => setD(await (await fetch("/api/operators")).json());
     f();
-    const interval = setInterval(f, 15_000);
-    return () => clearInterval(interval);
+    const i = setInterval(f, 15_000);
+    return () => clearInterval(i);
   }, []);
 
-  if (!data) return null;
-
-  const { stats, recovery, operators } = data;
+  if (!d) return null;
+  const { recovery, operators } = d;
 
   const chartData = operators.map((o) => ({
-    operator: o.operator_id.slice(0, 8),
-    success_rate: parseFloat(o.success_rate),
-    avg_chunks: parseFloat(o.avg_chunks || "0"),
-    total: parseInt(o.total),
+    op: o.operator_id.slice(0, 6),
+    chunks: parseFloat(o.avg_chunks || "0"),
+    rate: parseFloat(o.success_rate),
   }));
 
   return (
-    <div className="space-y-5">
-      {/* Recovery Assessment */}
-      <div className="rounded-xl border border-gray-700/50 bg-gray-800/50 p-5">
-        <h2 className="text-lg font-semibold text-white mb-4">
-          Blob Recoverability (Operator Chunk Verification)
-        </h2>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-          <MiniCard
-            label="Recovery Rate"
-            value={`${recovery.recovery_rate.toFixed(0)}%`}
-            good={recovery.recovery_rate >= 95}
-          />
-          <MiniCard
-            label="Blobs Checked"
-            value={`${recovery.blobs_checked}`}
-          />
-          <MiniCard
-            label="Recoverable"
-            value={`${recovery.blobs_recoverable}/${recovery.blobs_checked}`}
-            good={recovery.blobs_recoverable === recovery.blobs_checked}
-          />
-          <MiniCard
-            label="Operator Probe Success"
-            value={`${stats.success_rate.toFixed(1)}%`}
-            good={stats.success_rate >= 90}
-          />
+    <div className="space-y-4">
+      {/* Recovery summary */}
+      <div className="rounded-lg bg-zinc-900/60 border border-zinc-800/30 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-medium text-zinc-300">Blob Recoverability</h2>
+          <div className="flex items-center gap-4 text-xs text-zinc-500">
+            <span>checked: {recovery.blobs_checked}</span>
+            <span className={recovery.recovery_rate >= 95 ? "text-emerald-400" : "text-red-400"}>
+              {recovery.recovery_rate.toFixed(0)}% recoverable
+            </span>
+          </div>
         </div>
 
-        {/* Recovery details table */}
         {recovery.details.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="text-xs uppercase text-gray-500 border-b border-gray-700">
-                <tr>
-                  <th className="py-2 px-3">Blob</th>
-                  <th className="py-2 px-3">Chunks</th>
-                  <th className="py-2 px-3">Operators OK/Fail</th>
-                  <th className="py-2 px-3">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recovery.details.slice(0, 10).map((r, i) => (
-                  <tr key={i} className="border-b border-gray-700/30">
-                    <td className="py-1.5 px-3 font-mono text-gray-400 text-xs">
-                      {r.blob_key.slice(0, 16)}...
-                    </td>
-                    <td className="py-1.5 px-3 text-gray-300">
-                      {parseInt(r.total_chunks || "0").toLocaleString()}/1024
-                    </td>
-                    <td className="py-1.5 px-3 text-gray-300">
-                      {r.operators_ok}/{parseInt(r.operators_ok) + parseInt(r.operators_fail)}
-                    </td>
-                    <td className="py-1.5 px-3">
-                      {r.recoverable ? (
-                        <span className="text-green-400 text-xs font-medium">RECOVERABLE</span>
-                      ) : (
-                        <span className="text-red-400 text-xs font-medium">AT RISK</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-1.5">
+            {recovery.details.slice(0, 10).map((r, i) => {
+              const chunks = parseInt(r.total_chunks || "0");
+              const pct = Math.min(100, (chunks / 1024) * 100);
+              return (
+                <div key={i} className="relative px-3 py-2 rounded bg-zinc-800/50 overflow-hidden">
+                  <div
+                    className={`absolute inset-y-0 left-0 ${r.recoverable ? "bg-emerald-500/10" : "bg-red-500/10"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                  <div className="relative flex items-center justify-between">
+                    <span className="font-mono text-[10px] text-zinc-500">{r.blob_key.slice(0, 10)}</span>
+                    <span className={`text-[10px] font-medium ${r.recoverable ? "text-emerald-400" : "text-red-400"}`}>
+                      {chunks}/{1024}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Per-Operator Chart */}
+      {/* Operator chunks chart */}
       {chartData.length > 0 && (
-        <div className="rounded-xl border border-gray-700/50 bg-gray-800/50 p-5">
-          <h3 className="text-md font-semibold text-white mb-4">
-            Per-Operator Chunk Availability
-          </h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis dataKey="operator" stroke="#6B7280" fontSize={10} angle={-45} textAnchor="end" height={60} />
-              <YAxis stroke="#6B7280" />
+        <div className="rounded-lg bg-zinc-900/60 border border-zinc-800/30 p-4">
+          <h3 className="text-sm font-medium text-zinc-300 mb-3">Avg Chunks per Operator</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={chartData} margin={{ bottom: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+              <XAxis dataKey="op" stroke="#52525b" fontSize={9} angle={-45} textAnchor="end" />
+              <YAxis stroke="#52525b" fontSize={10} />
               <Tooltip
-                contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", fontSize: "12px" }}
-                formatter={(value, name) => {
-                  if (name === "avg_chunks") return [`${Number(value).toFixed(0)} chunks`, "Avg Chunks"];
-                  if (name === "success_rate") return [`${Number(value).toFixed(1)}%`, "Success Rate"];
-                  return [String(value), String(name)];
-                }}
+                contentStyle={{ backgroundColor: "#18181b", border: "1px solid #27272a", borderRadius: "6px", fontSize: "11px" }}
+                formatter={(v) => [`${Number(v).toFixed(0)} chunks`]}
               />
-              <Bar dataKey="avg_chunks" name="avg_chunks" radius={[3, 3, 0, 0]}>
-                {chartData.map((entry, i) => (
-                  <Cell
-                    key={i}
-                    fill={entry.success_rate >= 90 ? "#10B981" : entry.success_rate >= 50 ? "#F59E0B" : "#EF4444"}
-                  />
+              <Bar dataKey="chunks" radius={[2, 2, 0, 0]}>
+                {chartData.map((e, i) => (
+                  <Cell key={i} fill={e.rate >= 90 ? "#10b981" : e.rate >= 50 ? "#f59e0b" : "#ef4444"} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
       )}
-    </div>
-  );
-}
-
-function MiniCard({ label, value, good }: { label: string; value: string; good?: boolean }) {
-  return (
-    <div className="rounded-lg border border-gray-700/30 bg-gray-900/50 p-3">
-      <p className="text-xs text-gray-500">{label}</p>
-      <p className={`text-lg font-bold mt-0.5 ${good === undefined ? "text-white" : good ? "text-green-400" : "text-red-400"}`}>
-        {value}
-      </p>
     </div>
   );
 }

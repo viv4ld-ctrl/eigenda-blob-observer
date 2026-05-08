@@ -9,90 +9,65 @@ interface StatusData {
   status: "healthy" | "degraded" | "down";
 }
 
-const statusStyle = {
-  healthy: { label: "Healthy", bg: "bg-green-500/10", border: "border-green-500/30", text: "text-green-400", dot: "bg-green-400" },
-  degraded: { label: "Degraded", bg: "bg-yellow-500/10", border: "border-yellow-500/30", text: "text-yellow-400", dot: "bg-yellow-400" },
-  down: { label: "Down", bg: "bg-red-500/10", border: "border-red-500/30", text: "text-red-400", dot: "bg-red-400" },
-};
-
 export default function StatusCards() {
-  const [data, setData] = useState<StatusData | null>(null);
+  const [d, setD] = useState<StatusData | null>(null);
 
   useEffect(() => {
-    const f = async () => setData(await (await fetch("/api/status")).json());
+    const f = async () => setD(await (await fetch("/api/status")).json());
     f();
-    const i = setInterval(f, 15_000);
+    const i = setInterval(f, 10_000);
     return () => clearInterval(i);
   }, []);
 
-  if (!data) return <div className="text-gray-500 p-4">Loading...</div>;
+  if (!d) return <div className="h-24 rounded-lg bg-zinc-900 animate-pulse" />;
 
-  const s = statusStyle[data.status];
-  const coverage = data.blobs.total > 0 ? ((data.blobs.probed / data.blobs.total) * 100).toFixed(1) : "0";
+  const coverage = d.blobs.total > 0 ? ((d.blobs.probed / d.blobs.total) * 100) : 0;
 
   return (
-    <div className="space-y-4">
-      {/* Top status banner */}
-      <div className={`flex items-center justify-between rounded-xl border ${s.border} ${s.bg} px-6 py-4`}>
-        <div className="flex items-center gap-3">
-          <div className={`h-3 w-3 rounded-full ${s.dot} animate-pulse`} />
-          <span className={`text-lg font-semibold ${s.text}`}>{s.label}</span>
-          <span className="text-gray-500 text-sm ml-2">EigenDA Mainnet</span>
-        </div>
-        <div className="text-sm text-gray-400">
-          {data.blobs.last_hour} blobs/hr collected
-        </div>
+    <div className="space-y-3">
+      {/* Status bar */}
+      <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-zinc-900/80 border border-zinc-800/50">
+        <StatusDot status={d.status} />
+        <span className="text-sm text-zinc-300 font-medium">
+          {d.status === "healthy" ? "All systems operational" :
+           d.status === "degraded" ? "Degraded performance" : "System issues detected"}
+        </span>
+        <span className="ml-auto text-xs text-zinc-600 tabular-nums">
+          {d.blobs.last_hour.toLocaleString()} blobs/hr
+        </span>
       </div>
 
-      {/* Metric cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-        <MetricCard
-          label="Relay Success"
-          value={`${data.relay.success_rate.toFixed(1)}%`}
-          sub={`${data.relay.total_probes} probes`}
-          good={data.relay.success_rate >= 99}
-        />
-        <MetricCard
-          label="Relay Latency"
-          value={`${data.relay.avg_latency_ms.toFixed(0)}ms`}
-          sub="avg (1h)"
-        />
-        <MetricCard
-          label="Operator Success"
-          value={`${data.operator.success_rate.toFixed(1)}%`}
-          sub={`${data.operator.total_probes} probes`}
-          good={data.operator.success_rate >= 90}
-        />
-        <MetricCard
-          label="Operator Latency"
-          value={`${data.operator.avg_latency_ms.toFixed(0)}ms`}
-          sub={`${data.operator.unique_operators} operators seen`}
-        />
-        <MetricCard
-          label="Blobs Observed"
-          value={data.blobs.total.toLocaleString()}
-          sub="total collected"
-        />
-        <MetricCard
-          label="Probe Coverage"
-          value={`${coverage}%`}
-          sub={`${data.blobs.probed.toLocaleString()} verified`}
-        />
+      {/* Metrics */}
+      <div className="grid grid-cols-3 lg:grid-cols-6 gap-2">
+        <Metric label="Relay" value={`${d.relay.success_rate.toFixed(1)}%`} ok={d.relay.success_rate >= 99} />
+        <Metric label="Relay latency" value={`${d.relay.avg_latency_ms.toFixed(0)}ms`} />
+        <Metric label="Operators" value={`${d.operator.success_rate.toFixed(1)}%`} ok={d.operator.success_rate >= 85} />
+        <Metric label="Op latency" value={`${d.operator.avg_latency_ms.toFixed(0)}ms`} />
+        <Metric label="Blobs" value={d.blobs.total.toLocaleString()} />
+        <Metric label="Coverage" value={`${coverage.toFixed(1)}%`} sub={`${d.blobs.probed.toLocaleString()} verified`} />
       </div>
     </div>
   );
 }
 
-function MetricCard({ label, value, sub, good }: {
-  label: string; value: string; sub: string; good?: boolean;
-}) {
+function StatusDot({ status }: { status: string }) {
+  const c = status === "healthy" ? "bg-emerald-500" : status === "degraded" ? "bg-amber-500" : "bg-red-500";
   return (
-    <div className="rounded-lg border border-gray-700/50 bg-gray-800/50 p-4">
-      <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
-      <p className={`text-xl font-bold mt-1 ${good === undefined ? "text-white" : good ? "text-green-400" : "text-red-400"}`}>
-        {value}
-      </p>
-      <p className="text-xs text-gray-500 mt-1">{sub}</p>
+    <span className="relative flex h-2 w-2">
+      <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${c}`} />
+      <span className={`relative inline-flex rounded-full h-2 w-2 ${c}`} />
+    </span>
+  );
+}
+
+function Metric({ label, value, sub, ok }: { label: string; value: string; sub?: string; ok?: boolean }) {
+  return (
+    <div className="px-3 py-2.5 rounded-lg bg-zinc-900/60 border border-zinc-800/30">
+      <p className="text-[10px] text-zinc-600 uppercase tracking-wider">{label}</p>
+      <p className={`text-base font-semibold tabular-nums mt-0.5 ${
+        ok === undefined ? "text-zinc-200" : ok ? "text-emerald-400" : "text-red-400"
+      }`}>{value}</p>
+      {sub && <p className="text-[10px] text-zinc-600 mt-0.5">{sub}</p>}
     </div>
   );
 }
